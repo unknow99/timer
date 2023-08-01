@@ -1,0 +1,431 @@
+#include "stdio.h"
+#include "stdlib.h"
+
+#ifndef NULL
+#define NULL 0
+#endif
+
+typedef unsigned int uint32_t;
+void hal_os_delay(uint32_t ticks)
+{
+
+}
+
+
+
+typedef struct 
+{
+	void     (*event_func)(void *,uint32_t);
+	uint32_t event_status;
+	uint32_t event_exectimes;
+	uint32_t event_currtimes;
+	uint32_t event_execperiod;
+	uint32_t event_periodrefer;
+	uint32_t event_priority;
+	uint32_t event_inittick;
+	uint32_t event_firstdelay;
+	uint32_t event_maxeventdelay;
+	void     *event_queue;
+	uint32_t event_queuesize;
+	void     *event_next;
+	void     *event_last;
+}hal_os_event_t;
+
+typedef struct 
+{
+	hal_os_event_t timer_events;/**  **/
+    hal_os_event_t *timer_currevent;/** the addr of the event that is handling **/
+	uint32_t       timer_ticks;/** counter of timer clk **/
+    uint32_t       timer_tickstatus;/** status of timer clk **/
+	hal_os_event_t *timer_eventtab;/** addr of external table **/
+	uint32_t       timer_eventtabtotalnum;/** number of total event in table **/
+	uint32_t       timer_eventtabfreenum;/** number of remain event in table **/
+	uint32_t       timer_eventtabvalidnum;/** number of valid event in table **/
+	void           *mutex_t1;/** mutex for function "hal_os_Event_Free_Event_Get" **/
+	void           *mutex_t2;/** mutex for function "hal_os_Event_Get_Addr","hal_os_Event_Push","hal_os_Event_Pull","hal_os_Event_Priority_Set" **/
+}hal_os_timer_handle_t;
+
+/***************************************************************************************
+ * @brief:
+ * @param:
+ * @retval:
+***************************************************************************************/
+static hal_os_event_t *hal_os_Event_Free_Event_Get(const hal_os_timer_handle_t *handle)
+{
+	hal_os_event_t *timer_eventtab = NULL;
+	uint32_t timer_eventtabtotalnum = handle->timer_eventtabtotalnum;
+	hal_os_event_t *ret = NULL;
+
+	for(uint32_t idx = 0; idx < timer_eventtabtotalnum; )
+	{
+		timer_eventtab = &(handle->timer_eventtab[idx]);
+		if(NULL == (timer_eventtab->event_next))
+		{
+			timer_eventtab->event_next = (void *)(0xffffffff);
+			ret = timer_eventtab;
+			break;
+		}
+		idx ++;
+	}
+	return ret;
+}
+
+static hal_os_event_t *hal_os_Event_Get_Addr(hal_os_timer_handle_t *handle, const uint32_t priority)
+{
+	const hal_os_event_t *s_event = &(handle->timer_events);
+	hal_os_event_t *event = &(handle->timer_events);
+    hal_os_event_t *ret = NULL;
+
+    if(0 == handle->timer_eventtabfreenum)
+	{
+		ret = NULL;
+	}
+	else
+	{
+		do
+		{
+		    ret = event;
+			if((priority >= (event->event_priority)) && (priority < (((hal_os_event_t *)(event->event_next))->event_priority)))
+			{
+				break;
+			}
+			event = event->event_next;
+		}while(s_event != event);
+	}
+
+    return ret;
+}
+
+static hal_os_event_t *hal_os_Event_Push(hal_os_timer_handle_t *handle, hal_os_event_t *event)
+{
+	hal_os_event_t *addr = NULL;
+	hal_os_event_t *pevent = NULL;
+
+	if(NULL != (event->event_func))
+	{
+		if(0 != (event->event_execperiod))
+		{
+			pevent = hal_os_Event_Free_Event_Get(handle);
+
+			if(NULL != pevent)
+			{
+				(*pevent) = (*event);
+	            addr = hal_os_Event_Get_Addr(handle, event->event_priority);
+
+	            if(NULL != addr)
+	            {
+	            	pevent->event_last = addr;
+	            	pevent->event_next = addr->event_next;
+	            	
+                    if(0 != (pevent->event_periodrefer))
+					{
+						pevent->event_inittick = (handle->timer_ticks / pevent->event_execperiod) * pevent->event_execperiod;
+					}
+					else
+					{
+						pevent->event_inittick = handle->timer_ticks;
+					}
+
+	            	((hal_os_event_t *)(addr->event_next))->event_last = pevent;
+	            	(addr->event_next) = pevent;
+	            	(handle->timer_eventtabfreenum) --;
+	    	        (handle->timer_eventtabvalidnum) ++;
+		
+	            	if((0 != pevent->event_firstdelay) && (0 == pevent->event_periodrefer))
+	            	{
+	            		pevent->event_func(pevent->event_queue,pevent->event_queuesize);
+	    	        }
+	            }
+		    }
+		}
+	}
+
+	return pevent;
+}
+
+static void hal_os_Event_Pull(hal_os_timer_handle_t *handle, hal_os_event_t *event)
+{
+	void *event_last = event->event_last;
+	void *event_next = event->event_next;
+
+	while((event->event_status) & 0x80000000)
+	{
+		hal_os_delay(1);
+	}
+
+	hal_os_Event_Suspend(event);
+
+	if(NULL != (event->event_func))
+	{
+	    ((hal_os_event_t *)event_last)->event_next = event_next;
+	    ((hal_os_event_t *)event_next)->event_last = event_last;
+		(handle->timer_eventtabfreenum) ++;
+		(handle->timer_eventtabvalidnum) --;
+
+		event->event_currtimes     = 0;
+		event->event_execperiod    = 0;
+		event->event_exectimes     = 0;
+		event->event_firstdelay    = 0;
+		event->event_maxeventdelay = 0;
+		event->event_func          = NULL;
+		event->event_inittick      = 0;
+		event->event_last          = NULL;
+		event->event_next          = NULL;
+		event->event_periodrefer   = 0;
+		event->event_priority      = 0;
+		event->event_queue         = NULL;
+		event->event_queuesize     = 0;
+    }
+}
+
+void hal_os_Event_Suspend(hal_os_event_t *event)
+{
+	event->event_status = (event->event_status | 0x00000001);
+}
+
+void hal_os_Event_Resume(hal_os_event_t *event)
+{
+	event->event_status = (event->event_status) & 0xfffffff0;
+}
+
+void hal_os_Event_Priority_Set(hal_os_timer_handle_t *handle, hal_os_event_t **event, const uint32_t event_priority)
+{
+	hal_os_event_t *event_tp = NULL;
+	hal_os_event_t *addr = NULL;
+	uint32_t event_status = 0;
+
+	if(event_priority != ((*event)->event_priority))
+	{
+    	event_tp = hal_os_Event_Free_Event_Get((const hal_os_timer_handle_t *)handle);
+
+    	if(NULL != event_tp)
+    	{
+	    	(*event)->event_priority = event_priority;
+	    	(*event_tp) = (**event);
+	    	hal_os_Event_Pull(handle,(*event));
+			addr = hal_os_Event_Get_Addr(handle, event_tp->event_priority);
+			
+			if(NULL != addr)
+			{
+				event_tp->event_last = addr;
+	            event_tp->event_next = addr->event_next;
+
+				event_status = event_tp->event_status;
+				event_tp->event_status = event_tp->event_status | 0x00000001;
+				((hal_os_event_t *)(addr->event_next))->event_last = event_tp;
+				(addr->event_next) = event_tp;
+				(*event) = event_tp;
+				event_tp->event_status = event_status;
+			}
+	    }
+	}
+}
+
+void *hal_os_mutex_get(void)
+{
+	return NULL;
+}
+
+void hal_os_Timer_Init(hal_os_timer_handle_t *handle, hal_os_event_t *timer_eventtab, uint32_t tabsize)
+{
+	handle->timer_events.event_func = NULL;
+	handle->timer_events.event_status = 0x10000000;
+	handle->timer_events.event_exectimes = 0;
+	handle->timer_events.event_currtimes = 0;
+	handle->timer_events.event_execperiod = 0xffffffff;
+	handle->timer_events.event_periodrefer = 0;
+	handle->timer_events.event_priority = 0;
+	handle->timer_events.event_inittick = 0;
+	handle->timer_events.event_firstdelay = 0;
+	handle->timer_events.event_maxeventdelay = 0;
+	handle->timer_events.event_queue = NULL;
+	handle->timer_events.event_queuesize = 0;
+	handle->timer_events.event_next = &(handle->timer_events);
+	handle->timer_events.event_last = &(handle->timer_events);
+
+	handle->timer_currevent = &(handle->timer_events);
+	handle->timer_ticks = 0;
+	handle->timer_tickstatus = 0;
+	handle->timer_eventtab = timer_eventtab;
+	handle->timer_eventtabtotalnum = tabsize / sizeof(hal_os_event_t);
+	handle->timer_eventtabfreenum = tabsize / sizeof(hal_os_event_t);
+	handle->timer_eventtabvalidnum = 0;
+	handle->mutex_t1 = hal_os_mutex_get();
+	handle->mutex_t2 = hal_os_mutex_get();
+
+	if(NULL != (handle->timer_eventtab))
+	{
+		memset(handle->timer_eventtab,0,tabsize);
+	}
+
+	handle->timer_tickstatus = 0xffffffff;
+}
+
+void hal_os_Timer_Handle(hal_os_timer_handle_t *handle)
+{
+	handle->timer_currevent = handle->timer_events.event_next;
+
+	while((&(handle->timer_events)) != (handle->timer_currevent))
+	{
+		if((((handle->timer_ticks) - (handle->timer_currevent->event_inittick)) / (handle->timer_currevent->event_execperiod)) > (handle->timer_currevent->event_currtimes))
+		{
+		    if(NULL != (handle->timer_currevent->event_func))
+		    {
+			    if((0 == handle->timer_currevent->event_exectimes) || (handle->timer_currevent->event_currtimes < handle->timer_currevent->event_exectimes))
+		        {
+				    if(0 == ((handle->timer_currevent->event_status) & 0x00000001))
+				    {
+						(handle->timer_currevent->event_status) = (handle->timer_currevent->event_status) | 0x80000000;
+						(handle->timer_currevent->event_currtimes) ++;
+						if((((handle->timer_ticks) - (handle->timer_currevent->event_inittick)) % (handle->timer_currevent->event_execperiod)) > (handle->timer_currevent->event_maxeventdelay))
+						{
+							handle->timer_currevent->event_maxeventdelay = (((handle->timer_ticks) - (handle->timer_currevent->event_inittick)) % (handle->timer_currevent->event_execperiod));
+						}
+						(handle->timer_currevent->event_func)(handle->timer_currevent->event_queue,handle->timer_currevent->event_queuesize);
+						(handle->timer_currevent->event_status) = (handle->timer_currevent->event_status) & 0x7fffffff;
+					}
+					else
+					{
+						(handle->timer_currevent->event_exectimes) ++;
+						(handle->timer_currevent->event_currtimes) ++;
+					}
+				}
+			}
+		}
+		handle->timer_currevent = handle->timer_currevent->event_next;
+	}
+}
+
+void hal_os_Timer_Inc(hal_os_timer_handle_t *handle, uint32_t ticks_inc)
+{
+	if(0 != (handle->timer_tickstatus))
+	{
+    	handle->timer_ticks = handle->timer_ticks + ticks_inc;
+	}
+}
+
+#define EVENTTABSIZE (sizeof(eventtab))
+hal_os_event_t eventtab[128];
+hal_os_timer_handle_t handle;
+static void task_001(void *argc, uint32_t argc_size);
+static void task_002(void *argc, uint32_t argc_size);
+uint32_t queue_[32];
+uint32_t queue_2[32];
+
+hal_os_event_t event1 = 
+{	
+	.event_func = task_001,
+	.event_status = 0,
+	.event_exectimes = 10,
+	.event_currtimes = 0,
+	.event_execperiod = 3,
+	.event_periodrefer = 1,
+	.event_priority = 1,
+	.event_inittick = 0,
+	.event_firstdelay = 0,
+	.event_maxeventdelay = 0,
+	.event_queue = queue_,
+	.event_queuesize = 128,
+	.event_next = NULL,
+	.event_last = NULL
+};
+hal_os_event_t event2 = 
+{	
+	.event_func = task_002,
+	.event_status = 0,
+	.event_exectimes = 10,
+	.event_currtimes = 0,
+	.event_execperiod = 3,
+	.event_periodrefer = 1,
+	.event_priority = 2,
+	.event_inittick = 0,
+	.event_firstdelay = 0,
+	.event_maxeventdelay = 0,
+	.event_queue = queue_2,
+	.event_queuesize = 128,
+	.event_next = NULL,
+	.event_last = NULL
+};
+
+static void task_001(void *argc, uint32_t argc_size)
+{
+	static uint32_t times = 0;
+	times ++;
+	uint32_t idx = 0;
+
+	while(idx < argc_size)
+	{
+		printf("%c",((char *)argc)[idx]);
+		idx ++;
+	}
+}
+
+static void task_002(void *argc, uint32_t argc_size)
+{
+	static uint32_t times = 0;
+	times ++;
+	uint32_t idx = 0;
+
+	while(idx < argc_size)
+	{
+		printf("%c",((char *)argc)[idx]);
+		idx ++;
+	}
+}
+
+int main()
+{
+	uint32_t cnt = 0;
+	void *ev1,*ev2;
+	hal_os_Timer_Init(&handle,eventtab,EVENTTABSIZE);hal_os_Timer_Inc(&handle,2);
+
+	ev1 = hal_os_Event_Push(&handle,&event1);
+	ev2 = hal_os_Event_Push(&handle,&event2);
+
+	printf("--------ticks:%d",((hal_os_event_t *)handle.timer_events.event_next)->event_inittick);
+	
+	printf("\ntimer_ticks:%d,timer_tickstatus:%d,timer_eventtabtotalnum:%d,timer_eventtabfreenum:%d,timer_eventtabvalidnum:%d,",\
+	handle.timer_ticks,handle.timer_tickstatus,handle.timer_eventtabtotalnum,handle.timer_eventtabfreenum,handle.timer_eventtabvalidnum
+	);
+	printf("\n\n\n %x,%x,%x \n\n\n",(uint32_t )(handle.timer_events.event_last),(uint32_t )(handle.timer_events.event_next),(uint32_t )(&handle.timer_events));
+hal_os_Event_Suspend(ev2);
+    while(1)
+	{
+		hal_os_Timer_Inc(&handle,1);
+
+        sprintf((void *)queue_,"\ntask1 cnt : %d,tick:%d",cnt,handle.timer_ticks);
+		sprintf((void *)queue_2,"\ntask2 cnt : %d,tick:%d",cnt,handle.timer_ticks);
+
+		hal_os_Timer_Handle(&handle);
+
+		if(handle.timer_ticks == 5)
+		{
+			//hal_os_Event_Priority_Set(&handle,&ev1,4);
+			//hal_os_Event_Priority_Set(&handle,&ev2,3);
+			hal_os_Event_Suspend(ev1);
+		}
+		if(handle.timer_ticks == 8)
+		{
+			//hal_os_Event_Priority_Set(&handle,&ev1,3);
+			//hal_os_Event_Priority_Set(&handle,&ev2,4);
+			hal_os_Event_Resume(ev1);
+			hal_os_Event_Resume(ev2);
+		}
+		if(handle.timer_ticks == 14)
+		{
+			hal_os_Event_Pull(&handle,ev1);
+		}
+		
+		//hal_os_Event_Priority_Set(&handle,ev1,1);
+
+		cnt ++;
+		//printf("\n@@@@ cycle : %d",cnt);
+		if(cnt >= 60)
+		{
+			break;
+		}
+	}
+
+	printf("ok");
+	return 0;
+}
